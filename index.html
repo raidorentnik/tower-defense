@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Elemental Tower Defense</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #14141e;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 10px;
+  }
+  h1 { font-size: 1.4rem; margin: 8px 0; letter-spacing: 1px; }
+  #ui {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 8px;
+    width: 100%;
+    max-width: 960px;
+  }
+  .stat { font-size: 0.95rem; padding: 4px 10px; border-radius: 6px; background: #2a2a3a; }
+  .stat.money { color: #f0d23c; }
+  .stat.lives { color: #dc3c3c; }
+  .tower-btn {
+    border: none; border-radius: 8px; padding: 8px 14px;
+    font-size: 0.9rem; font-weight: bold; color: #fff; cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.1s;
+  }
+  .tower-btn:hover { transform: scale(1.05); }
+  .tower-btn.selected { outline: 3px solid #fff; outline-offset: 2px; }
+  .btn { border: none; border-radius: 8px; padding: 8px 16px; font-size: 0.9rem; font-weight: bold; color: #fff; cursor: pointer; }
+  .btn:hover { opacity: 0.9; }
+  #canvas-wrap { position: relative; }
+  canvas { border-radius: 10px; background: #14141e; touch-action: none; max-width: 100%; }
+  #msg {
+    margin-top: 8px; font-size: 0.95rem; min-height: 1.4em;
+    color: #f0a028; font-weight: bold;
+  }
+  #overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+    justify-content: center; align-items: center; z-index: 10;
+  }
+  #overlay .box {
+    background: #1e1e2e; border-radius: 14px; padding: 30px 40px; text-align: center;
+  }
+  #overlay h2 { color: #dc3c3c; margin-bottom: 10px; }
+  #overlay p { margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<h1>Elemental Tower Defense</h1>
+<div id="ui">
+  <span class="stat money" id="money">Money: 250</span>
+  <span class="stat lives" id="lives">Lives: 20</span>
+  <span class="stat" id="wave">Wave: 0</span>
+  <button class="tower-btn selected" id="btn-fire" style="background:#e68c28">Fire 100</button>
+  <button class="tower-btn" id="btn-ice" style="background:#3cc8dc">Ice 120</button>
+  <button class="tower-btn" id="btn-earth" style="background:#3cb45a">Earth 150</button>
+  <button class="tower-btn" id="btn-wind" style="background:#a050dc">Wind 90</button>
+  <button class="btn" id="btn-wave" style="background:#3c78dc">Next Wave</button>
+  <button class="btn" id="btn-ad" style="background:#3cb45a">Watch Ad (x2 dmg)</button>
+</div>
+<div id="canvas-wrap">
+  <canvas id="game" width="960" height="640"></canvas>
+</div>
+<div id="msg"></div>
+<div id="overlay">
+  <div class="box">
+    <h2>GAME OVER</h2>
+    <p id="final-wave"></p>
+    <button class="btn" id="btn-restart" style="background:#3cb45a">Play Again</button>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+const TOWER_TYPES = {
+  fire:  {cost:100, damage:12, range:130, cooldown:0.6, color:"#e68c28", effect:"burn"},
+  ice:   {cost:120, damage:8,  range:120, cooldown:0.8, color:"#3cc8dc", effect:"slow"},
+  earth: {cost:150, damage:20, range:100, cooldown:1.2, color:"#3cb45a", effect:"stun"},
+  wind:  {cost:90,  damage:6,  range:150, cooldown:0.3, color:"#a050dc", effect:"none"},
+);
+const PATH = [[0,320],[200,320],[200,160],[480,160],[480,480],[720,480],[720,240],[960,240]];
+
+class Enemy {
+  constructor(wave) {
+    this.pathIndex = 0;
+    this.x = PATH[0][0]; this.y = PATH[0][1];
+    this.speed = 60 + wave * 8;
+    this.maxHp = 40 + wave * 15;
+    this.hp = this.maxHp;
+    this.slowTimer = 0; this.stunTimer = 0; this.burnTimer = 0; this.burnDamage = 0;
+    this.alive = true;
+  }
+  update(dt) {
+    if (!this.alive) return;
+    if (this.stunTimer > 0) { this.stunTimer -= dt; return; }
+    let speed = this.speed;
+    if (this.slowTimer > 0) { speed *= 0.5; this.slowTimer -= dt; }
+    if (this.burnTimer > 0) {
+      this.hp -= this.burnDamage * dt;
+      this.burnTimer -= dt;
+      if (this.hp <= 0) { this.alive = false; return; }
+    }
+    if (this.pathIndex >= PATH.length - 1) { this.alive = false; return; }
+    const [tx, ty] = PATH[this.pathIndex + 1];
+    const dx = tx - this.x, dy = ty - this.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < speed * dt) { this.x = tx; this.y = ty; this.pathIndex++; }
+    else { this.x += dx / dist * speed * dt; this.y += dy / dist * speed * dt; }
+  }
+  draw() {
+    if (!this.alive) return;
+    let color = "#dc3c3c";
+    if (this.burnTimer > 0) color = "#e68c28";
+    else if (this.slowTimer > 0) color = "#3cc8dc";
+    ctx.beginPath(); ctx.arc(this.x, this.y, 12, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    const barW = 24, ratio = Math.max(0, this.hp / this.maxHp);
+    ctx.fillStyle = "#3c3c50"; ctx.fillRect(this.x - barW/2, this.y - 20, barW, 4);
+    ctx.fillStyle = "#3cb45a"; ctx.fillRect(this.x - barW/2, this.y - 20, barW * ratio, 4);
+  }
+}
+
+class Tower {
+  constructor(x, y, type) {
+    this.x = x; this.y = y; this.type = type;
+    const d = TOWER_TYPES[type];
+    this.damage = d.damage; this.range = d.range; this.cooldown = d.cooldown;
+    this.timer = 0; this.color = d.color; this.effect = d.effect; this.totalDamage = 0;
+  }
+  update(dt, enemies) {
+    this.timer -= dt;
+    if (this.timer > 0) return;
+    let target = null, best = this.range;
+    for (const e of enemies) {
+      if (!e.alive) continue;
+      const d = Math.hypot(e.x - this.x, e.y - this.y);
+      if (d < best) { best = d; target = e; }
+    }
+    if (target) {
+      target.hp -= this.damage;
+      this.totalDamage += this.damage;
+      if (target.hp <= 0) target.alive = false;
+      if (this.effect === "burn") { target.burnTimer = 2.0; target.burnDamage = 4; }
+      else if (this.effect === "slow") target.slowTimer = 1.5;
+      else if (this.effect === "stun") target.stunTimer = 0.8;
+      this.timer = this.cooldown;
+    }
+  }
+  draw() {
+    ctx.beginPath(); ctx.arc(this.x, this.y, 16, 0, Math.PI * 2); ctx.fillStyle = this.color; ctx.fill();
+    ctx.beginPath(); ctx.arc(this.x, this.y, 16, 0, Math.PI * 2); ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+  }
+}
+
+const game = {
+  towers: [], enemies: [], money: 250, lives: 20, wave: 0,
+  spawnTimer: 0, spawnsLeft: 0, selectedType: "fire",
+  adActive: false, adTimer: 0, gameOver: false, waveActive: false,
+  startWave() {
+    this.wave++;
+    this.spawnsLeft = 5 + this.wave * 2;
+    this.spawnTimer = 0;
+    this.waveActive = true;
+  },
+  update(dt) {
+    if (this.gameOver) return;
+    if (this.spawnsLeft > 0) {
+      this.spawnTimer -= dt;
+      if (this.spawnTimer <= 0) {
+        this.enemies.push(new Enemy(this.wave));
+        this.spawnsLeft--;
+        this.spawnTimer = 1.0;
+      }
+    }
+    for (const e of this.enemies) {
+      e.update(dt);
+      if (!e.alive && e.pathIndex >= PATH.length - 1) {
+        this.lives--;
+        if (this.lives <= 0) this.gameOver = true;
+      }
+    }
+    this.enemies = this.enemies.filter(e => e.alive);
+    for (const t of this.towers) t.update(dt, this.enemies);
+    if (this.adActive) {
+      this.adTimer -= dt;
+      if (this.adTimer <= 0) this.adActive = false;
+    }
+    if (this.waveActive && this.spawnsLeft === 0 && this.enemies.length === 0) {
+      this.waveActive = false;
+      this.money += 50 + this.wave * 10;
+    }
+  },
+  draw() {
+    ctx.fillStyle = "#14141e"; ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < PATH.length - 1; i++) {
+      ctx.beginPath();
+      ctx.moveTo(PATH[i][0], PATH[i][1]);
+      ctx.lineTo(PATH[i+1][0], PATH[i+1][1]);
+      ctx.strokeStyle = "#3c3c50"; ctx.lineWidth = 40; ctx.stroke();
+    }
+    for (const t of this.towers) t.draw();
+    for (const e of this.enemies) e.draw();
+    document.getElementById("money").textContent = "Money: " + this.money;
+    document.getElementById("lives").textContent = "Lives: " + this.lives;
+    document.getElementById("wave").textContent = "Wave: " + this.wave;
+    const adBtn = document.getElementById("btn-ad");
+    if (this.adActive) {
+      adBtn.textContent = "Ad: " + this.adTimer.toFixed(1) + "s";
+      adBtn.style.background = "#3c3c50";
+      document.getElementById("msg").textContent = "DOUBLE DAMAGE ACTIVE";
+    } else {
+      adBtn.textContent = "Watch Ad (x2 dmg)";
+      adBtn.style.background = "#3cb45a";
+      document.getElementById("msg").textContent = "";
+    }
+    if (this.gameOver) {
+      document.getElementById("final-wave").textContent = "Reached wave " + this.wave;
+      document.getElementById("overlay").style.display = "flex";
+    }
+  }
+);
+
+for (const name of Object.keys(TOWER_TYPES)) {
+  document.getElementById("btn-" + name).addEventListener("click", () => {
+    game.selectedType = name;
+    for (const n of Object.keys(TOWER_TYPES))
+      document.getElementById("btn-" + n).classList.toggle("selected", n === name);
+  });
+}
+document.getElementById("btn-wave").addEventListener("click", () => {
+  if (!game.waveActive) game.startWave();
+});
+document.getElementById("btn-ad").addEventListener("click", () => {
+  if (!game.adActive) { game.adActive = true; game.adTimer = 30; }
+});
+document.getElementById("btn-restart").addEventListener("click", () => {
+  game.towers = []; game.enemies = []; game.money = 250; game.lives = 20;
+  game.wave = 0; game.spawnTimer = 0; game.spawnsLeft = 0;
+  game.selectedType = "fire"; game.adActive = false; game.adTimer = 0;
+  game.gameOver = false; game.waveActive = false;
+  document.getElementById("overlay").style.display = "none";
+});
+
+function getPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width, scaleY = H / rect.height;
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  return [(clientX - rect.left) * scaleX, (clientY - rect.top) * scaleY];
+}
+function handleClick(pos) {
+  const [mx, my] = pos;
+  if (my > 100) {
+    const cost = TOWER_TYPES[game.selectedType].cost;
+    if (game.money >= cost) {
+      let onPath = false;
+      for (let i = 0; i < PATH.length - 1; i++) {
+        const [x1, y1] = PATH[i], [x2, y2] = PATH[i+1];
+        if (Math.min(x1,x2) - 20 <= mx && mx <= Math.max(x1,x2) + 20 &&
+            Math.min(y1,y2) - 20 <= my && my <= Math.max(y1,y2) + 20) onPath = true;
+      }
+      if (!onPath) {
+        game.towers.push(new Tower(mx, my, game.selectedType));
+        game.money -= cost;
+      }
+    }
+  }
+}
+canvas.addEventListener("click", e => handleClick(getPos(e)));
+canvas.addEventListener("touchstart", e => { e.preventDefault(); handleClick(getPos(e)); }, {passive: false});
+window.addEventListener("keydown", e => {
+  if (e.key === " " && !game.waveActive) game.startWave();
+  if (e.key === "a" && !game.adActive) { game.adActive = true; game.adTimer = 30; }
+});
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  game.update(dt);
+  game.draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
